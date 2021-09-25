@@ -209,6 +209,56 @@ cleanup:
   return NULL;
 }
 
+struct zip_t *zip_openfd(int fd, int level, char mode) {
+  struct zip_t *zip = NULL;
+
+  if (fd < 0) {
+    // invalid fd
+    goto cleanup;
+  }
+
+  if (level < 0)
+    level = MZ_DEFAULT_LEVEL;
+  if ((level & 0xF) > MZ_UBER_COMPRESSION) {
+    // Wrong compression level
+    goto cleanup;
+  }
+
+  zip = (struct zip_t *)calloc((size_t)1, sizeof(struct zip_t));
+  if (!zip)
+    goto cleanup;
+
+  zip->level = (mz_uint)level;
+  switch (mode) {
+  case 'w':
+    // Create a new archive.
+    if (!mz_zip_writer_init_filefd(&(zip->archive), fd, 0)) {
+      // Cannot initialize zip_archive writer
+      goto cleanup;
+    }
+    break;
+
+  case 'r':
+    if (!mz_zip_reader_init_filefd(
+            &(zip->archive), fd,
+            zip->level | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY)) {
+      // An archive file does not exist or cannot initialize
+      // zip_archive reader
+      goto cleanup;
+    }
+    break;
+
+  default:
+    goto cleanup;
+  }
+
+  return zip;
+
+cleanup:
+  CLEANUP(zip);
+  return NULL;
+}
+
 void zip_close(struct zip_t *zip) {
   if (zip) {
     // Always finalize, even if adding failed for some reason, so we have a

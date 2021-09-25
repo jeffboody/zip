@@ -85,6 +85,20 @@ struct zip_t;
 extern struct zip_t *zip_open(const char *zipname, int level, char mode);
 
 /**
+ * Opens zip archive with compression level using the given mode.
+ *
+ * @param fd zip archive file descriptor.
+ * @param level compression level (0-9 are the standard zlib-style levels).
+ * @param mode file access mode.
+ *        - 'r': opens a file for reading/extracting (the file must exists).
+ *        - 'w': creates an empty file for writing.
+ *        - 'a': appends to an existing archive.
+ *
+ * @return the zip archive handler or NULL on error
+ */
+extern struct zip_t *zip_openfd(int fd, int level, char mode);
+
+/**
  * Closes the zip archive, releases resources - always finalize.
  *
  * @param zip zip archive handler.

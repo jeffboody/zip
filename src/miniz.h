@@ -803,6 +803,8 @@ mz_bool mz_zip_reader_init_mem(mz_zip_archive *pZip, const void *pMem,
 #ifndef MINIZ_NO_STDIO
 mz_bool mz_zip_reader_init_file(mz_zip_archive *pZip, const char *pFilename,
                                 mz_uint32 flags);
+mz_bool mz_zip_reader_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint32 flags);
 #endif
 
 // Returns the total number of files in the archive.
@@ -895,6 +897,8 @@ mz_bool mz_zip_writer_init_heap(mz_zip_archive *pZip,
 #ifndef MINIZ_NO_STDIO
 mz_bool mz_zip_writer_init_file(mz_zip_archive *pZip, const char *pFilename,
                                 mz_uint64 size_to_reserve_at_beginning);
+mz_bool mz_zip_writer_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint64 size_to_reserve_at_beginning);
 #endif
 
 // Converts a ZIP archive reader object into a writer object, to allow efficient
@@ -4129,6 +4133,7 @@ static FILE *mz_freopen(const char *pPath, const char *pMode, FILE *pStream) {
 #endif
 #define MZ_FILE FILE
 #define MZ_FOPEN mz_fopen
+// TODO - MZ_FDOPEN
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -4145,6 +4150,7 @@ static FILE *mz_freopen(const char *pPath, const char *pMode, FILE *pStream) {
 #endif
 #define MZ_FILE FILE
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -4161,6 +4167,7 @@ static FILE *mz_freopen(const char *pPath, const char *pMode, FILE *pStream) {
 #endif
 #define MZ_FILE FILE
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -4177,6 +4184,7 @@ static FILE *mz_freopen(const char *pPath, const char *pMode, FILE *pStream) {
 #endif
 #define MZ_FILE FILE
 #define MZ_FOPEN(f, m) fopen64(f, m)
+// TODO - MZ_FDOPEN
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -4193,6 +4201,7 @@ static FILE *mz_freopen(const char *pPath, const char *pMode, FILE *pStream) {
 #endif
 #define MZ_FILE FILE
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5015,6 +5024,32 @@ mz_bool mz_zip_reader_init_file(mz_zip_archive *pZip, const char *pFilename,
                                 mz_uint32 flags) {
   mz_uint64 file_size;
   MZ_FILE *pFile = MZ_FOPEN(pFilename, "rb");
+  if (!pFile)
+    return MZ_FALSE;
+  if (MZ_FSEEK64(pFile, 0, SEEK_END)) {
+    MZ_FCLOSE(pFile);
+    return MZ_FALSE;
+  }
+  file_size = MZ_FTELL64(pFile);
+  if (!mz_zip_reader_init_internal(pZip, flags)) {
+    MZ_FCLOSE(pFile);
+    return MZ_FALSE;
+  }
+  pZip->m_pRead = mz_zip_file_read_func;
+  pZip->m_pIO_opaque = pZip;
+  pZip->m_pState->m_pFile = pFile;
+  pZip->m_archive_size = file_size;
+  if (!mz_zip_reader_read_central_dir(pZip, flags)) {
+    mz_zip_reader_end(pZip);
+    return MZ_FALSE;
+  }
+  return MZ_TRUE;
+}
+
+mz_bool mz_zip_reader_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint32 flags) {
+  mz_uint64 file_size;
+  MZ_FILE *pFile = MZ_FDOPEN(fd, "rb");
   if (!pFile)
     return MZ_FALSE;
   if (MZ_FSEEK64(pFile, 0, SEEK_END)) {
@@ -5869,6 +5904,34 @@ mz_bool mz_zip_writer_init_file(mz_zip_archive *pZip, const char *pFilename,
   if (!mz_zip_writer_init(pZip, size_to_reserve_at_beginning))
     return MZ_FALSE;
   if (NULL == (pFile = MZ_FOPEN(pFilename, "wb"))) {
+    mz_zip_writer_end(pZip);
+    return MZ_FALSE;
+  }
+  pZip->m_pState->m_pFile = pFile;
+  if (size_to_reserve_at_beginning) {
+    mz_uint64 cur_ofs = 0;
+    char buf[4096];
+    MZ_CLEAR_OBJ(buf);
+    do {
+      size_t n = (size_t)MZ_MIN(sizeof(buf), size_to_reserve_at_beginning);
+      if (pZip->m_pWrite(pZip->m_pIO_opaque, cur_ofs, buf, n) != n) {
+        mz_zip_writer_end(pZip);
+        return MZ_FALSE;
+      }
+      cur_ofs += n;
+      size_to_reserve_at_beginning -= n;
+    } while (size_to_reserve_at_beginning);
+  }
+  return MZ_TRUE;
+}
+mz_bool mz_zip_writer_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint64 size_to_reserve_at_beginning) {
+  MZ_FILE *pFile;
+  pZip->m_pWrite = mz_zip_file_write_func;
+  pZip->m_pIO_opaque = pZip;
+  if (!mz_zip_writer_init(pZip, size_to_reserve_at_beginning))
+    return MZ_FALSE;
+  if (NULL == (pFile = MZ_FDOPEN(fd, "wb"))) {
     mz_zip_writer_end(pZip);
     return MZ_FALSE;
   }
