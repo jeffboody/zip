@@ -1434,6 +1434,9 @@ MINIZ_EXPORT mz_bool mz_zip_reader_init_file_v2(mz_zip_archive *pZip,
                                                 mz_uint flags,
                                                 mz_uint64 file_start_ofs,
                                                 mz_uint64 archive_size);
+MINIZ_EXPORT mz_bool mz_zip_reader_init_filefd(mz_zip_archive *pZip,
+                                               int fd,
+                                               mz_uint32 flags);
 
 /* Read an archive from an already opened FILE, beginning at the current file
  * position. */
@@ -1682,6 +1685,9 @@ MINIZ_EXPORT mz_bool mz_zip_writer_init_file_v2(
     mz_uint64 size_to_reserve_at_beginning, mz_uint flags);
 MINIZ_EXPORT mz_bool mz_zip_writer_init_cfile(mz_zip_archive *pZip,
                                               MZ_FILE *pFile, mz_uint flags);
+MINIZ_EXPORT mz_bool
+mz_zip_writer_init_filefd(mz_zip_archive *pZip, int fd,
+                          mz_uint64 size_to_reserve_at_beginning);
 #endif
 
 /* Converts a ZIP archive reader object into a writer object, to allow
@@ -5049,6 +5055,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <sys/utime.h>
 #endif
 #define MZ_FOPEN mz_fopen
++// TODO - MZ_FDOPEN
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5071,6 +5078,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <sys/utime.h>
 #endif
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5088,6 +5096,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <sys/utime.h>
 #endif
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5109,6 +5118,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <utime.h>
 #endif
 #define MZ_FOPEN(f, m) fopen64(f, m)
+// TODO - MZ_FDOPEN
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5127,6 +5137,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <utime.h>
 #endif
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -5146,6 +5157,7 @@ static int mz_mkdir(const char *pDirname) {
 #include <utime.h>
 #endif
 #define MZ_FOPEN(f, m) fopen(f, m)
+#define MZ_FDOPEN(fd, m) fdopen(fd, m)
 #define MZ_FCLOSE fclose
 #define MZ_FREAD fread
 #define MZ_FWRITE fwrite
@@ -6226,6 +6238,32 @@ mz_bool mz_zip_reader_init_cfile(mz_zip_archive *pZip, MZ_FILE *pFile,
     return MZ_FALSE;
   }
 
+  return MZ_TRUE;
+}
+
+mz_bool mz_zip_reader_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint32 flags) {
+  mz_uint64 file_size;
+  MZ_FILE *pFile = MZ_FDOPEN(fd, "rb");
+  if (!pFile)
+    return MZ_FALSE;
+  if (MZ_FSEEK64(pFile, 0, SEEK_END)) {
+    MZ_FCLOSE(pFile);
+    return MZ_FALSE;
+  }
+  file_size = MZ_FTELL64(pFile);
+  if (!mz_zip_reader_init_internal(pZip, flags)) {
+    MZ_FCLOSE(pFile);
+    return MZ_FALSE;
+  }
+  pZip->m_pRead = mz_zip_file_read_func;
+  pZip->m_pIO_opaque = pZip;
+  pZip->m_pState->m_pFile = pFile;
+  pZip->m_archive_size = file_size;
+  if (!mz_zip_reader_read_central_dir(pZip, flags)) {
+    mz_zip_reader_end(pZip);
+    return MZ_FALSE;
+  }
   return MZ_TRUE;
 }
 
@@ -8128,6 +8166,35 @@ mz_bool mz_zip_writer_init_cfile(mz_zip_archive *pZip, MZ_FILE *pFile,
       MZ_FTELL64(pZip->m_pState->m_pFile);
   pZip->m_zip_type = MZ_ZIP_TYPE_CFILE;
 
+  return MZ_TRUE;
+}
+
+mz_bool mz_zip_writer_init_filefd(mz_zip_archive *pZip, int fd,
+                                  mz_uint64 size_to_reserve_at_beginning) {
+  MZ_FILE *pFile;
+  pZip->m_pWrite = mz_zip_file_write_func;
+  pZip->m_pIO_opaque = pZip;
+  if (!mz_zip_writer_init(pZip, size_to_reserve_at_beginning))
+    return MZ_FALSE;
+  if (NULL == (pFile = MZ_FDOPEN(fd, "wb"))) {
+    mz_zip_writer_end(pZip);
+    return MZ_FALSE;
+  }
+  pZip->m_pState->m_pFile = pFile;
+  if (size_to_reserve_at_beginning) {
+    mz_uint64 cur_ofs = 0;
+    char buf[4096];
+    MZ_CLEAR_OBJ(buf);
+    do {
+      size_t n = (size_t)MZ_MIN(sizeof(buf), size_to_reserve_at_beginning);
+      if (pZip->m_pWrite(pZip->m_pIO_opaque, cur_ofs, buf, n) != n) {
+        mz_zip_writer_end(pZip);
+        return MZ_FALSE;
+      }
+      cur_ofs += n;
+      size_to_reserve_at_beginning -= n;
+    } while (size_to_reserve_at_beginning);
+  }
   return MZ_TRUE;
 }
 #endif /* #ifndef MINIZ_NO_STDIO */
